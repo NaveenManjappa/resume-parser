@@ -16,6 +16,7 @@ class CandidateProfile(BaseModel):
 
     full_name: str = Field(
         ...,
+        #min_length=600,
         description=(
             "The candidate's full legal name as it appears at the top of the resume. "
             "If no name can be identified, the resume is malformed and extraction should fail."
