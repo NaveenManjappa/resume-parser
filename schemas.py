@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field, HttpUrl
-from typing import Optional, Literal
+from typing import Literal
 
 
 class CandidateProfile(BaseModel):
@@ -20,7 +20,7 @@ class CandidateProfile(BaseModel):
         description=(
             "The candidate's full legal name as it appears at the top of the resume. "
             "If no name can be identified, the resume is malformed and extraction should fail."
-        )
+        ),
     )
     email: EmailStr | None = Field(
         default=None,

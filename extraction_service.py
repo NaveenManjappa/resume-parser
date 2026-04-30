@@ -1,18 +1,26 @@
-from api_models import ExtractResponse, ExtractResponseMetadata
+import logging
+import time
+
 import instructor
 from google import genai
-from schemas import CandidateProfile
-import time
-import logging
+from instructor import Instructor
+
+from api_models import ExtractResponse, ExtractResponseMetadata
 from config import GEMINI_API_KEY, GEMINI_MODEL
+from schemas import CandidateProfile
 
 logger = logging.getLogger(__name__)
-_gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-_instructor_client = instructor.from_genai(_gemini_client)
 
-def extract_profile(resume_text: str) -> ExtractResponse:
+
+def create_instructor_client() -> Instructor:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return instructor.from_genai(gemini_client)
+
+
+def extract_profile(resume_text: str, instructor_client: Instructor) -> ExtractResponse:
+    # raise RuntimeError("deliberate test of 500 path")
     start = time.perf_counter()
-    result = _instructor_client.chat.completions.create_with_completion(
+    result = instructor_client.chat.completions.create_with_completion(
         model=GEMINI_MODEL,
         response_model=CandidateProfile,
         max_retries=3,
@@ -43,7 +51,7 @@ def extract_profile(resume_text: str) -> ExtractResponse:
     )
 
     logger.info(
-        "Extraction complete: %d ms,prompt=%s,completion=%s",
+        "Extraction complete: %d ms, prompt=%s, completion=%s",
         elapsed_time,
         prompt_tokens,
         completion_tokens,
