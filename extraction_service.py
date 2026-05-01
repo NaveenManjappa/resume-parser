@@ -6,14 +6,14 @@ from google import genai
 from instructor import Instructor
 
 from api_models import ExtractResponse, ExtractResponseMetadata
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import settings
 from schemas import CandidateProfile
 
 logger = logging.getLogger(__name__)
 
 
 def create_instructor_client() -> Instructor:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=settings.gemini_api_key)
     return instructor.from_genai(gemini_client)
 
 
@@ -21,9 +21,9 @@ def extract_profile(resume_text: str, instructor_client: Instructor) -> ExtractR
     # raise RuntimeError("deliberate test of 500 path")
     start = time.perf_counter()
     result = instructor_client.chat.completions.create_with_completion(
-        model=GEMINI_MODEL,
+        model=settings.gemini_model,
         response_model=CandidateProfile,
-        max_retries=3,
+        max_retries=settings.max_retries,
         messages=[
             {
                 "role": "user",
@@ -44,7 +44,7 @@ def extract_profile(resume_text: str, instructor_client: Instructor) -> ExtractR
     )
 
     metadata = ExtractResponseMetadata(
-        model_used=GEMINI_MODEL,
+        model_used=settings.gemini_model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         extraction_time_ms=elapsed_time,

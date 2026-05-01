@@ -27,7 +27,7 @@ print(sparse.model_dump_json(indent=2))
 print("\n--- Test 3: missing full_name should fail ---")
 try:
     CandidateProfile(
-        
+        full_name="",
         years_of_experience_source="unknown"
     )
     print("Should have failed!")

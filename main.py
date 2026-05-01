@@ -2,12 +2,13 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
-from instructor.exceptions import InstructorRetryException
+from instructor.core import InstructorRetryException
 from instructor import Instructor
 from api_models import ExtractRequest, ExtractResponse
 from extraction_service import extract_profile, create_instructor_client
+from config import settings
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
 

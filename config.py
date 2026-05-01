@@ -1,10 +1,20 @@
-import os
-from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not found in the environment")
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+    gemini_api_key: str = Field(..., description="API key for Google Gemini")
+    gemini_model: str = Field(
+        default="gemini-2.5-flash", description="Gemini model identifier"
+    )
+    max_retries: int = Field(
+        default=3, ge=0, le=10, description="Max instructor retry count per extraction"
+    )
+    log_level: str = Field(default="INFO", description="Python logging level")
+
+
+settings = Settings()  # type: ignore[call-arg]
