@@ -7,9 +7,20 @@ from instructor import Instructor
 from api_models import ExtractRequest, ExtractResponse
 from extraction_service import extract_profile, create_instructor_client
 from config import settings
+from azure.monitor.opentelemetry import configure_azure_monitor
+import os
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
+
+_app_insights_enabled = bool(os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"))
+
+if _app_insights_enabled:
+    configure_azure_monitor(logger_name=__name__)
+    logger.info("Azure Monitor instrumentation enabled")
+else:
+    logger.info("Azure Monitor not configured (no connection string)")
 
 
 @asynccontextmanager
@@ -25,7 +36,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Resume Parser API", version="0.1.0", lifespan=lifespan)
 
-
+if _app_insights_enabled:
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info("FastAPI auto-instrumentation enabled")
+    
 def get_instructor_client(request: Request) -> Instructor:
     return request.app.state.instructor_client
 
@@ -55,3 +69,8 @@ def extract_text(
             status_code=500,
             detail="Internal error during extraction.",
         )
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
