@@ -1,5 +1,5 @@
 import logging
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
 from instructor.core import InstructorRetryException
@@ -39,11 +39,22 @@ app = FastAPI(title="Resume Parser API", version="0.1.0", lifespan=lifespan)
 if _app_insights_enabled:
     FastAPIInstrumentor.instrument_app(app)
     logger.info("FastAPI auto-instrumentation enabled")
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    if x_api_key != settings.app_api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
 def get_instructor_client(request: Request) -> Instructor:
     return request.app.state.instructor_client
 
 
-@app.post("/api/v1/extract", response_model=ExtractResponse)
+@app.post(
+    "/api/v1/extract",
+    response_model=ExtractResponse,
+    dependencies=[Depends(require_api_key)],
+)
 def extract_text(
     request: ExtractRequest,
     instructor_client: Instructor = Depends(get_instructor_client),
