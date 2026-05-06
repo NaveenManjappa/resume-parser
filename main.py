@@ -39,7 +39,6 @@ app = FastAPI(title="Resume Parser API", version="0.1.0", lifespan=lifespan)
 if _app_insights_enabled:
     FastAPIInstrumentor.instrument_app(app)
     logger.info("FastAPI auto-instrumentation enabled")
-    
 def get_instructor_client(request: Request) -> Instructor:
     return request.app.state.instructor_client
 
