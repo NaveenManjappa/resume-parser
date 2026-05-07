@@ -2,7 +2,7 @@ name: Build and Deploy to Azure Container Apps
 
 on:
   push:
-    branches: [main,feature/migrate-to-container-apps]
+    branches: [main]
 
 env:
   IMAGE_NAME: resume-parser
