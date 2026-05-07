@@ -14,15 +14,23 @@
 6. [The CI/CD Workflow, Annotated](#6-the-cicd-workflow-annotated)
 7. [Debugging Stories](#7-debugging-stories)
 8. [Mental Models Worth Keeping](#8-mental-models-worth-keeping)
-9. [Self-Quiz for Spaced Repetition](#9-self-quiz-for-spaced-repetition)
+9. [Phase 2: Migration to Container Apps](#9-phase-2-migration-to-container-apps)
+10. [Self-Quiz for Spaced Repetition](#10-self-quiz-for-spaced-repetition)
 
 ---
 
 ## 1. Project Overview
 
-A FastAPI service that extracts structured `CandidateProfile` objects from raw resume text using Google Gemini, with `instructor` enforcing a Pydantic schema as the response format. Containerized with Docker, deployed to Azure App Service (Linux containers) via a private Azure Container Registry, instrumented with Application Insights for full observability (auto-instrumented requests/dependencies plus custom OpenTelemetry metrics for token usage and failure rates), and continuously deployed via GitHub Actions on every push to `main`.
+A FastAPI service that extracts structured `CandidateProfile` objects from raw resume text using Google Gemini, with `instructor` enforcing a Pydantic schema as the response format. Containerized with Docker, instrumented with Application Insights for full observability (auto-instrumented requests/dependencies plus custom OpenTelemetry metrics for token usage and failure rates), and continuously deployed via GitHub Actions on every push to `main`.
 
-**The path:** local FastAPI → containerized → Azure resources → live URL → telemetry → CI/CD → custom metrics.
+**The project went through two deployment phases:**
+
+- **Phase 1**: deployed to Azure App Service (Linux containers) via a private Azure Container Registry. CI/CD via GitHub Actions, ACR-backed. Cost: ~£15/month.
+- **Phase 2**: migrated to Azure Container Apps with a public Docker Hub image. Same CI/CD shape, scale-to-zero, ~£0/month idle cost. Application Insights observability fully retained. Added API key auth on the extract endpoint as a basic safeguard for the public URL.
+
+This document covers both phases. Phase 1 forms the bulk of the document; Phase 2 is captured as a self-contained migration story in [§9](#9-phase-2-migration-to-container-apps).
+
+**The path:** local FastAPI → containerized → Azure resources → live URL → telemetry → CI/CD → custom metrics → migration to scale-to-zero runtime.
 
 ---
 
@@ -863,7 +871,281 @@ Don't pre-flight-check actions that are free to attempt and informative when the
 
 ---
 
-## 9. Self-Quiz for Spaced Repetition
+## 9. Phase 2: Migration to Container Apps
+
+After the App Service deployment was running for some time, the cost-to-traffic ratio became hard to justify for a portfolio app with sporadic demo traffic. Phase 2 migrates the runtime to Azure Container Apps with a public Docker Hub image, achieving near-zero idle cost while preserving the entire observability and CI/CD architecture.
+
+### 9.1 Why migrate
+
+Phase 1 cost breakdown (monthly):
+
+| Resource | Cost | Why |
+|---|---|---|
+| App Service Plan B1 | ~£10-12 | Always-on reserved compute, billed hourly |
+| ACR Basic | ~£4 | Storage tier, billed daily |
+| App Insights + Log Analytics | £0 | Free tier covers low traffic |
+| **Total** | **~£15-16/month** | |
+
+For a portfolio piece serving occasional interview demos, the always-on B1 Plan was the dominant cost — and it was idle 99% of the time. Container Apps' scale-to-zero model fits this traffic profile: pay nothing when no requests are arriving, cold-start in 2-5 seconds when one does. Acceptable trade-off for the use case.
+
+The migration narrative for interviews: *"I deliberately chose App Service initially for the always-on guarantee that mattered while iterating. After verifying the workload's actual traffic profile, I migrated to Container Apps to align infrastructure cost with usage. The observability and CI/CD architecture transferred without rewrites because both were built on portable primitives — OpenTelemetry, Docker, GitHub Actions."*
+
+### 9.2 What changed (and what didn't)
+
+**What changed:**
+
+| Concern | Phase 1 | Phase 2 |
+|---|---|---|
+| Runtime | App Service (Linux container) | Container Apps |
+| Pricing model | Reserved capacity (Plan) | Per-request + per-vCPU-second |
+| Image registry | Azure Container Registry (private) | Docker Hub (public) |
+| Image auth in deploy | ACR admin credentials | None (public image) |
+| Idle cost | ~£15/month | ~£0/month |
+| Cold start | ~5s on first deploy, then warm | ~2-5s after each idle period |
+| Endpoint auth | None | API key required on `/api/v1/extract` |
+
+**What stayed the same:**
+
+- The Dockerfile (zero changes)
+- The application code's business logic
+- Application Insights instance + custom metrics + log integration
+- Log Analytics workspace
+- CI/CD pipeline shape (GitHub Actions, build → push → deploy)
+- GitHub service principal for Azure auth
+- The image itself (same artifact, different registry)
+
+This is the point worth filing: **portable primitives produce portable systems.** OpenTelemetry isn't tied to App Service; Docker images aren't tied to ACR; GitHub Actions isn't tied to a specific deploy target. Each of those decisions in Phase 1 made Phase 2 cheap.
+
+### 9.3 New code added in Phase 2
+
+**API key authentication** on `/api/v1/extract` — reasoning: a public URL on Container Apps is discoverable by bots that scrape Container Apps' wildcard DNS pattern. Without auth, anyone could exhaust the Gemini API quota.
+
+`config.py`:
+
+```python
+app_api_key: str = Field(..., description="Shared API key required to access the extract endpoint")
+```
+
+Required field — the app refuses to start without it. Fail-fast on missing auth config.
+
+`main.py` — dependency-injection pattern keeps auth logic separate from business logic:
+
+```python
+from fastapi import Header
+
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    if x_api_key != settings.app_api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+@app.post(
+    "/api/v1/extract",
+    response_model=ExtractResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def extract_text(...):
+    # body unchanged
+```
+
+The dependency runs as a side effect (validates and possibly raises) without injecting into the handler. `extract_text` doesn't know about authentication. `/healthz` stays unauthenticated — the platform needs to hit it freely for liveness checks.
+
+### 9.4 New Azure resources in Phase 2
+
+```
+Resource Group: resume-parser-rg-n
+├── Container Apps Environment: resume-parser-env-n      ← NEW (replaces App Service Plan)
+├── Container App: resume-parser-app-cae                 ← NEW (replaces Web App)
+├── Log Analytics Workspace: resume-parser-logs-n        ← REUSED
+└── Application Insights: resume-parser-insights-n       ← REUSED
+```
+
+The **Environment** is Container Apps' equivalent of the App Service Plan — a logical grouping providing networking and a Log Analytics hookup. The **Container App** is the equivalent of the Web App — the actual running service. Multiple Container Apps can share an Environment.
+
+Differences from Phase 1's mental model:
+
+- **Scale-to-zero by default**: with no requests for ~5 minutes, the running container shuts down. Costs nothing while idle.
+- **Revisions**: each deployment creates a new immutable revision. Old revisions can be retained for rollback or traffic splitting.
+- **Secrets are first-class**: Container Apps has a built-in `secrets` concept distinct from `env-vars`. Secrets store sensitive values encrypted at rest; env vars reference them via `secretref:name`. App Service mixed both into a single bag of "App Settings."
+
+### 9.5 Phase 2 commands
+
+**Container Apps Environment** (created via portal due to local CLI extension install issues, but equivalent CLI command shown):
+
+```bash
+az containerapp env create \
+  --name resume-parser-env-n \
+  --resource-group resume-parser-rg-n \
+  --location westeurope \
+  --logs-workspace-id $WORKSPACE_ID \
+  --logs-workspace-key $WORKSPACE_KEY
+```
+
+The workspace ID and key come from the existing Log Analytics workspace:
+
+```bash
+$WORKSPACE_ID = az monitor log-analytics workspace show \
+  --resource-group resume-parser-rg-n \
+  --workspace-name resume-parser-logs-n \
+  --query customerId -o tsv
+
+$WORKSPACE_KEY = az monitor log-analytics workspace get-shared-keys \
+  --resource-group resume-parser-rg-n \
+  --workspace-name resume-parser-logs-n \
+  --query primarySharedKey -o tsv
+```
+
+**Container App** with secrets and env-var references:
+
+```bash
+az containerapp create \
+  --name resume-parser-app-cae \
+  --resource-group resume-parser-rg-n \
+  --environment resume-parser-env-n \
+  --image <dockerhub-username>/resume-parser:0.4 \
+  --target-port 8000 \
+  --ingress external \
+  --min-replicas 0 \
+  --max-replicas 2 \
+  --cpu 0.5 \
+  --memory 1.0Gi \
+  --secrets \
+    gemini-api-key='<key>' \
+    app-api-key='<key>' \
+    appinsights-connstr=$APPINSIGHTS_CONNSTR \
+  --env-vars \
+    GEMINI_API_KEY=secretref:gemini-api-key \
+    GEMINI_MODEL=gemini-2.5-flash \
+    LOG_LEVEL=INFO \
+    APP_API_KEY=secretref:app-api-key \
+    APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connstr
+```
+
+**Image update** (this is what CI/CD runs on every push):
+
+```bash
+az containerapp update \
+  --name resume-parser-app-cae \
+  --resource-group resume-parser-rg-n \
+  --image <dockerhub-username>/resume-parser:<sha>
+```
+
+Container Apps automatically creates a new revision, drains traffic from the old one, and switches over once the new revision passes health checks. Zero-downtime by default.
+
+**Tear down old resources** (after verification):
+
+```bash
+az webapp stop --resource-group resume-parser-rg-n --name resume-parser-app-n
+az webapp delete --resource-group resume-parser-rg-n --name resume-parser-app-n
+az appservice plan delete --resource-group resume-parser-rg-n --name resume-parser-plan-n --yes
+az acr delete --resource-group resume-parser-rg-n --name resumeparseracrn --yes
+```
+
+### 9.6 The new CI/CD workflow
+
+`.github/workflows/deploy.yml` after migration:
+
+```yaml
+name: Build and Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+
+env:
+  IMAGE_NAME: resume-parser
+  RESOURCE_GROUP: resume-parser-rg-n
+  CONTAINER_APP_NAME: resume-parser-app-cae
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and tag image
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Push image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install containerapp CLI extension
+        run: az extension add --name containerapp --upgrade
+
+      - name: Update Container App with new image
+        run: |
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+```
+
+**Three structural differences from Phase 1's workflow:**
+
+1. **`docker/login-action@v3`** instead of `azure/docker-login@v2` — the registry-agnostic action handles any Docker registry given credentials. The Azure-specific helper was an ACR convenience.
+2. **`az login` happens AFTER docker push** — the Docker work talks only to Docker Hub; only the final deploy step needs Azure auth. Order matters less in practice (`az login` could be earlier), but logically the dependencies sit this way.
+3. **`az extension add --name containerapp`** — the runner needs the extension installed because Container Apps commands aren't in the base `az` CLI. GitHub-hosted Ubuntu runners install this cleanly; the local Windows machine couldn't (corporate environment + pip permissions).
+
+**GitHub Secrets in Phase 2:**
+
+| Secret | Value |
+|---|---|
+| `AZURE_CREDENTIALS` | Service principal JSON (unchanged from Phase 1) |
+| `DOCKERHUB_USERNAME` | Docker Hub username |
+| `DOCKERHUB_TOKEN` | Docker Hub Personal Access Token (Read, Write, Delete scope) |
+
+ACR-related secrets and `WEBAPP_NAME` were removed.
+
+**Deploy time end-to-end: ~80 seconds** from `git push` to live revision. Faster than Phase 1, mostly because Container Apps' revision switch is more responsive than App Service's container reload.
+
+### 9.7 New mental models from Phase 2
+
+**Portable primitives produce portable systems.** Phase 2 was cheap because Phase 1's choices (OpenTelemetry, Docker, GitHub Actions) were tied to standards rather than vendors. The lesson generalizes: pick the most standard primitive at each layer, and migration becomes a swap of one layer at a time rather than a rewrite.
+
+**Migration cost = friction across layers, not magnitude of change.** This migration touched: code (one auth dependency added), Docker registry (ACR → Docker Hub), runtime (App Service → Container Apps), CI/CD (deploy step changed). But each touch was tiny — the layers themselves stayed valid. Painful migrations happen when assumptions leak across layers.
+
+**Scale-to-zero is a usage-pattern decision, not a technology decision.** B1 made sense while you were iterating heavily. Container Apps makes sense for sporadic demo traffic. Neither is "better" — they fit different traffic profiles. Senior engineering is matching the runtime to the workload, not picking the runtime that sounds most modern.
+
+**Public images have legitimate cost-free uses.** The reflexive "private registry for production" wisdom doesn't apply when there's nothing proprietary in the image. For a portfolio app reproducible from a public GitHub repo, Docker Hub is correct.
+
+**Auth is cross-cutting.** Adding `require_api_key` as a FastAPI dependency rather than handler-level code keeps `extract_text` ignorant of authentication. The dependency becomes its own testable unit. Same principle as not putting the App Insights connection string in `Settings` — concerns separate cleanly.
+
+### 9.8 Phase 2 outcome
+
+| Metric | Before | After |
+|---|---|---|
+| Idle monthly cost | ~£15-16 | ~£0 |
+| Active per-request cost | Negligible (under Plan) | Negligible (under free tier) |
+| Cold start | None (always-on) | 2-5s |
+| Time to deploy a code change | ~80s (CI/CD) | ~80s (CI/CD) |
+| Observability fidelity | Full | Full (unchanged) |
+| Lines of code added | 0 | ~10 (auth dependency + Settings field) |
+| Resources to manage | 6 | 4 |
+
+**The interview narrative now sounds like:**
+
+> "I deployed an LLM-backed FastAPI service to Azure App Service initially with full Application Insights observability — request tracing, dependency tracing, custom OpenTelemetry metrics for token usage and failure rates. After validating the workload's actual traffic profile, I migrated to Azure Container Apps with a public Docker Hub image — same observability, same CI/CD shape, ~£0 idle cost. The migration touched four layers but each touch was small because the underlying primitives — OpenTelemetry, Docker, GitHub Actions — were standards-based, not vendor-specific."
+
+That's a senior engineering story. Most candidates can describe what they built. Fewer can describe a migration *and* the design decisions that made it cheap.
+
+---
+
+## 10. Self-Quiz for Spaced Repetition
 
 Use these for review. Answer from memory; check yourself against the relevant section.
 
@@ -912,10 +1194,21 @@ Use these for review. Answer from memory; check yourself against the relevant se
 29. Why are metric attributes preferred over multiplying metric names?
 30. State why "succeeded" doesn't mean "exists" in cloud APIs, and the corresponding habit.
 
+### Phase 2 specific
+
+31. What's the structural difference between an App Service Plan and a Container Apps Environment? What does each bind to?
+32. Container Apps' "secrets" and "env-vars" are separate concepts. What's the difference, and why is the indirection useful?
+33. Why didn't the migration require any changes to the Dockerfile or the application's business logic?
+34. Why does a public Docker Hub image not weaken the security of the deployed app, given that the app already had a public URL?
+35. State the two-step pattern Container Apps uses for image updates: what happens between `az containerapp update --image ...` and traffic actually reaching the new image?
+36. What's the cold-start trade-off you accepted by moving to scale-to-zero, and when would that trade-off be wrong?
+37. The new CI/CD workflow needs `az login` AND `docker login` — but in Phase 1 only one of those was needed. Why?
+38. Why was the `require_api_key` dependency added at the route level via `dependencies=[...]` instead of as a parameter to `extract_text`?
+
 ---
 
 ## End
 
-This document is a snapshot of one project's worth of learning. Re-read it when context-switching back, when starting a similar deployment, or when an interview is coming up. Every command listed here was run, every concept was hit, every debugging story actually happened.
+This document is a snapshot of one project's worth of learning, across two deployment phases. Re-read it when context-switching back, when starting a similar deployment, or when an interview is coming up. Every command listed here was run, every concept was hit, every debugging story actually happened, and the migration in §9 was driven by the same trade-off thinking that runs through Phase 1.
 
 The goal isn't to memorize. It's to recognize, when something similar comes up, *"I've seen this shape before."* That's all senior engineering really is.
