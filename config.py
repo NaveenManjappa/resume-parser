@@ -15,6 +15,9 @@ class Settings(BaseSettings):
         default=3, ge=0, le=10, description="Max instructor retry count per extraction"
     )
     log_level: str = Field(default="INFO", description="Python logging level")
+    app_api_key: str = Field(
+        ..., description="Shared API key required to access the extract endpoint"
+    )
 
 
 settings = Settings()  # type: ignore[call-arg]
