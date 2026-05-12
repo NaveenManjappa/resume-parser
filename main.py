@@ -87,8 +87,7 @@ def get_instructor_client(request: Request) -> Instructor:
 
 @app.post(
     "/api/v1/extract",
-    response_model=ExtractResponse,
-    dependencies=[Depends(require_api_key)],
+    response_model=ExtractResponse    
 )
 @limiter.limit("5/minute")
 def extract_text(
