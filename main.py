@@ -1,6 +1,7 @@
 import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from contextlib import asynccontextmanager
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from instructor.core import InstructorRetryException
 from instructor import Instructor
@@ -10,6 +11,8 @@ from config import settings
 from azure.monitor.opentelemetry import configure_azure_monitor
 import os
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
@@ -21,6 +24,27 @@ if _app_insights_enabled:
     logger.info("Azure Monitor instrumentation enabled")
 else:
     logger.info("Azure Monitor not configured (no connection string)")
+
+
+def get_real_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[-1].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    response = JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit reached. Please try again in a few seconds."},
+    )
+    response = request.app.state.limiter._inject_headers(
+        response, request.state.view_rate_limit
+    )
+    return response
+
+
+limiter = Limiter(key_func=get_real_client_ip)
 
 
 @asynccontextmanager
@@ -35,6 +59,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Resume Parser API", version="0.1.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 if _app_insights_enabled:
     FastAPIInstrumentor.instrument_app(app)
@@ -55,12 +81,14 @@ def get_instructor_client(request: Request) -> Instructor:
     response_model=ExtractResponse,
     dependencies=[Depends(require_api_key)],
 )
+@limiter.limit("5/minute")
 def extract_text(
-    request: ExtractRequest,
+    request: Request,
+    payload: ExtractRequest,
     instructor_client: Instructor = Depends(get_instructor_client),
 ) -> ExtractResponse:
     try:
-        return extract_profile(request.resume_text, instructor_client)
+        return extract_profile(payload.resume_text, instructor_client)
     except InstructorRetryException as e:
         logger.warning("Extraction failed after retries: %s", e)
         raise HTTPException(
