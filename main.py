@@ -2,6 +2,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Depends, Request, Header
 from contextlib import asynccontextmanager
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 from instructor.core import InstructorRetryException
 from instructor import Instructor
@@ -59,6 +60,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Resume Parser API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins="*",
+    allow_credentials=False,
+    allow_methods=["OPTIONS","POST","GET"],
+    allow_headers=["Accept","Content-Type"]
+
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 

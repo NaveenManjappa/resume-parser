@@ -19,5 +19,7 @@ class Settings(BaseSettings):
         ..., description="Shared API key required to access the extract endpoint"
     )
 
+    cors_origins:list[str] = Field(...,description="The url which needs to be added to the origins")
+
 
 settings = Settings()  # type: ignore[call-arg]
